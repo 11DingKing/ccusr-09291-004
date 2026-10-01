@@ -510,3 +510,166 @@ class SupplierConfirmationStatistics(BaseModel):
 class ExtendedStatisticsResponse(StatisticsResponse):
     supplier_confirmation_stats: SupplierConfirmationStatistics
     supplier_bottlenecks: List[SupplierBottleneckAnalysis]
+
+
+# ==================== 采购订单分级审批工作流 ====================
+
+class BudgetPeriodBase(BaseModel):
+    period: str = Field(..., description="预算期间 YYYY-MM")
+    total_budget: float = 0
+    remark: Optional[str] = None
+
+class BudgetPeriodCreate(BudgetPeriodBase):
+    pass
+
+class BudgetPeriodUpdate(BaseModel):
+    total_budget: Optional[float] = None
+    remark: Optional[str] = None
+
+class BudgetPeriod(BudgetPeriodBase):
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    class Config:
+        from_attributes = True
+
+class BudgetUsage(BaseModel):
+    period: str
+    configured: bool = False
+    total_budget: Optional[float] = None
+    committed_amount: float = 0          # 已转正式订单金额
+    pending_approval_amount: float = 0   # 审批中（冻结占用）金额
+    available_amount: Optional[float] = None
+
+class ApprovalLevelRule(BaseModel):
+    level: int
+    level_name: str
+    min_amount: float                # 达到该级别的金额下限（含）
+    approver: str
+
+class ApprovalRuleVersionCreate(BaseModel):
+    thresholds_json: Optional[str] = None  # 为空则沿用当前默认阈值
+    critical_uplift: int = 1
+    low_grade_uplift: int = 1
+    exception_uplift: int = 1
+    change_note: Optional[str] = None
+
+class ApprovalRuleVersionSchema(BaseModel):
+    id: int
+    version: int
+    thresholds_json: str
+    critical_uplift: int
+    low_grade_uplift: int
+    exception_uplift: int
+    change_note: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class ApprovalSubmitRequest(BaseModel):
+    """采购员提交转单审批。"""
+    suggestion_id: Optional[int] = None
+    order_no: str
+    supplier_id: int
+    material_id: Optional[int] = None    # 从建议转单时可留空，取建议物料
+    quantity: Optional[int] = None
+    unit_price: Optional[float] = None   # 为空取供货能力记录单价
+    expected_date: Optional[date] = None
+    is_exception_supplier: bool = False
+    exception_reason: Optional[str] = None
+    requester: Optional[str] = "采购员"
+    remark: Optional[str] = None
+    budget_period: Optional[str] = None  # 为空取期望交货日所在月
+
+class ApprovalActionRequest(BaseModel):
+    """签署动作：批准 / 拒绝。"""
+    action: str = Field(..., description="approve 或 reject")
+    comment: Optional[str] = None
+
+class ApprovalRecuseRequest(BaseModel):
+    """审批人回避，指定同级别替换人。"""
+    substitute_approver: str
+    reason: str
+
+class ApprovalResubmitRequest(BaseModel):
+    """被拒绝后重提，可修改订单要素，将重新评估并锁定最新规则版本。"""
+    order_no: Optional[str] = None
+    supplier_id: Optional[int] = None
+    quantity: Optional[int] = None
+    unit_price: Optional[float] = None
+    expected_date: Optional[date] = None
+    is_exception_supplier: Optional[bool] = None
+    exception_reason: Optional[str] = None
+    requester: Optional[str] = None
+    remark: Optional[str] = None
+    budget_period: Optional[str] = None
+
+class ApprovalNodeSchema(BaseModel):
+    id: int
+    level: int
+    level_name: str
+    approver: str
+    seq: int
+    is_substitute: bool
+    substituted_for: Optional[str] = None
+    status: str
+    action_comment: Optional[str] = None
+    acted_at: Optional[datetime] = None
+    signed_snapshot_hash: Optional[str] = None
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class ApprovalEventSchema(BaseModel):
+    id: int
+    event_type: str
+    actor: Optional[str] = None
+    detail: Optional[str] = None
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class ApprovalRequestSchema(BaseModel):
+    id: int
+    request_no: str
+    suggestion_id: Optional[int] = None
+    order_no: str
+    supplier_id: int
+    material_id: int
+    quantity: int
+    unit_price: float
+    total_amount: float
+    expected_date: date
+    is_exception_supplier: bool
+    exception_reason: Optional[str] = None
+    budget_period: str
+    risk_level: str
+    required_level: int
+    rule_version_id: int
+    snapshot_json: str
+    snapshot_hash: str
+    status: str
+    resubmitted_from_id: Optional[int] = None
+    purchase_order_id: Optional[int] = None
+    requester: Optional[str] = None
+    remark: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    supplier: Optional[Supplier] = None
+    material: Optional[Material] = None
+    nodes: List[ApprovalNodeSchema] = []
+    events: List[ApprovalEventSchema] = []
+    class Config:
+        from_attributes = True
+
+class ApprovalRoutePreview(BaseModel):
+    """提交前的分级路线试算结果。"""
+    total_amount: float
+    risk_level: str
+    risk_factors: List[str]
+    required_level: int
+    rule_version: int
+    route: List[ApprovalLevelRule]
+    is_exception_supplier: bool
+    budget: BudgetUsage

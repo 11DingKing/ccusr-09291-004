@@ -2,7 +2,6 @@ from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boo
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
-
 class Material(Base):
     __tablename__ = "materials"
     id = Column(Integer, primary_key=True, index=True)
@@ -275,3 +274,111 @@ class SupplierShortageImpact(Base):
     production_batch = relationship("ProductionBatch")
     vehicle_model = relationship("VehicleModel")
     material = relationship("Material")
+
+
+# ==================== 采购订单分级审批工作流 ====================
+
+class ApprovalRuleVersion(Base):
+    """审批规则版本：每次规则换版新增一行，历史版本永久保留，已发起的申请锁定其发起时的版本。"""
+    __tablename__ = "approval_rule_versions"
+    id = Column(Integer, primary_key=True, index=True)
+    version = Column(Integer, unique=True, index=True, nullable=False)
+    thresholds_json = Column(Text, nullable=False)  # 金额分级阈值与级别定义
+    critical_uplift = Column(Integer, default=1)    # 关键物料上调级别数
+    low_grade_uplift = Column(Integer, default=1)   # C级供应商上调级别数
+    exception_uplift = Column(Integer, default=1)  # 例外供应商上调级别数
+    change_note = Column(String(300))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class BudgetPeriod(Base):
+    """采购预算期间（按月），金额单位元。"""
+    __tablename__ = "budget_periods"
+    id = Column(Integer, primary_key=True, index=True)
+    period = Column(String(7), unique=True, index=True, nullable=False)  # YYYY-MM
+    total_budget = Column(Float, nullable=False, default=0)
+    remark = Column(String(300))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class PurchaseApprovalRequest(Base):
+    """采购转单审批申请：正式采购订单在全部有效批准完成前不得创建。"""
+    __tablename__ = "purchase_approval_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    request_no = Column(String(50), unique=True, index=True)  # 取到自增id后立即生成，业务唯一
+    suggestion_id = Column(Integer, ForeignKey("purchase_suggestions.id"))
+    order_no = Column(String(50), nullable=False)            # 预期正式订单号，冻结
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False)
+    material_id = Column(Integer, ForeignKey("materials.id"), nullable=False)
+    quantity = Column(Integer, nullable=False)
+    unit_price = Column(Float, nullable=False, default=0)
+    total_amount = Column(Float, nullable=False, default=0)
+    expected_date = Column(Date, nullable=False)
+    is_exception_supplier = Column(Boolean, default=False)   # 例外供应商：无供货能力记录或非优选
+    exception_reason = Column(Text)                          # 例外供应商获批理由（必填留痕）
+    budget_period = Column(String(7), nullable=False)
+
+    # 风险评估结果（申请时固化）
+    risk_level = Column(String(10), nullable=False)          # low/medium/high
+    required_level = Column(Integer, nullable=False)         # 最终需要的最高审批级别
+    rule_version_id = Column(Integer, ForeignKey("approval_rule_versions.id"), nullable=False)
+
+    # 冻结摘要（flush 取 id 后、commit 前赋值）
+    snapshot_json = Column(Text)               # 签署人看到的订单摘要全文
+    snapshot_hash = Column(String(64))        # SHA-256，防篡改
+
+    status = Column(String(20), default="pending")           # pending/approved/rejected/cancelled/converted
+    resubmitted_from_id = Column(Integer, ForeignKey("purchase_approval_requests.id"))
+    purchase_order_id = Column(Integer, ForeignKey("purchase_orders.id"))  # 转单成功后回填
+    requester = Column(String(50), default="采购员")
+    remark = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    supplier = relationship("Supplier")
+    material = relationship("Material")
+    rule_version = relationship("ApprovalRuleVersion")
+    nodes = relationship("ApprovalNode", back_populates="request",
+                         cascade="all, delete-orphan",
+                         order_by="ApprovalNode.id")
+    events = relationship("ApprovalEvent", back_populates="request",
+                          cascade="all, delete-orphan",
+                          order_by="ApprovalEvent.id")
+    purchase_order = relationship("PurchaseOrder", foreign_keys=[purchase_order_id])
+    resubmitted_from = relationship("PurchaseApprovalRequest", remote_side="PurchaseApprovalRequest.id")
+
+
+class ApprovalNode(Base):
+    """审批节点：一条路线按级别顺序排列；回避时原节点保留(recused)，替换审批人新增节点，保证可核对。"""
+    __tablename__ = "approval_nodes"
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("purchase_approval_requests.id"), nullable=False)
+    level = Column(Integer, nullable=False)
+    level_name = Column(String(50), nullable=False)
+    approver = Column(String(50), nullable=False)
+    seq = Column(Integer, nullable=False)                    # 同级别内的签署序号（回避替换会递增）
+    is_substitute = Column(Boolean, default=False)           # 是否回避替换人
+    substituted_for = Column(String(50))                     # 被替换（回避）的原审批人
+    status = Column(String(20), default="pending")           # pending/approved/rejected/recused
+    action_comment = Column(Text)
+    acted_at = Column(DateTime(timezone=True))
+    # 该审批人签署时看到的冻结摘要哈希，事后可核对"所见即所签"
+    signed_snapshot_hash = Column(String(64))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    request = relationship("PurchaseApprovalRequest", back_populates="nodes")
+
+
+class ApprovalEvent(Base):
+    """审批事件流水：只增不改，所有动作（提交/批准/拒绝/回避/预算变化/重复签署拦截/换版/转单）均留痕。"""
+    __tablename__ = "approval_events"
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("purchase_approval_requests.id"), nullable=False)
+    event_type = Column(String(30), nullable=False)
+    actor = Column(String(50))
+    detail = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    request = relationship("PurchaseApprovalRequest", back_populates="events")

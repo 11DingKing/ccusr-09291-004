@@ -57,7 +57,7 @@ def generate_suggestions(
         db, request.vehicle_model_priorities, request.include_safety_stock
     )
 
-@router.post("/suggestions/{suggestion_id}/convert", response_model=PurchaseOrder)
+@router.post("/suggestions/{suggestion_id}/convert", status_code=403)
 def convert_suggestion_to_order(
     suggestion_id: int,
     order_no: str,
@@ -66,12 +66,12 @@ def convert_suggestion_to_order(
     expected_date: Optional[date] = None,
     db: Session = Depends(get_db)
 ):
-    try:
-        return PurchaseService.convert_suggestion_to_order(
-            db, suggestion_id, order_no, supplier_id, quantity, expected_date
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    # 审计整改：采购员不得直接转单，必须走分级审批，全部有效批准完成后由审批闸门创建正式订单。
+    raise HTTPException(
+        status_code=403,
+        detail="采购建议不得直接转单：请先通过 /api/v1/approvals/requests 提交分级审批，"
+               "全部有效批准完成后调用 /approvals/requests/{id}/convert 创建正式订单"
+    )
 
 @router.get("/orders", response_model=List[PurchaseOrder])
 def get_purchase_orders(
@@ -88,12 +88,14 @@ def get_purchase_orders(
         return crud_purchase_order.get_by_material(db, material_id)
     return crud_purchase_order.get_multi(db)
 
-@router.post("/orders", response_model=PurchaseOrder)
+@router.post("/orders", status_code=403)
 def create_purchase_order(order_in: PurchaseOrderCreate, db: Session = Depends(get_db)):
-    existing = crud_purchase_order.get_by_order_no(db, order_in.order_no)
-    if existing:
-        raise HTTPException(status_code=400, detail="订单号已存在")
-    return crud_purchase_order.create(db, obj_in=order_in)
+    # 审计整改：正式采购订单只能由审批通过的转单闸门创建，禁止手工直接落单。
+    raise HTTPException(
+        status_code=403,
+        detail="正式采购订单只能在分级审批全部有效批准完成后，"
+               "通过 /api/v1/approvals/requests/{id}/convert 创建"
+    )
 
 @router.put("/orders/{order_id}", response_model=PurchaseOrder)
 def update_purchase_order(

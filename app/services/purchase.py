@@ -196,53 +196,10 @@ class PurchaseService:
         quantity: Optional[int] = None,
         expected_date: Optional[date] = None
     ) -> PurchaseOrder:
-        suggestion = crud_purchase_suggestion.get(db, suggestion_id)
-        if not suggestion:
-            raise ValueError(f"采购建议不存在: {suggestion_id}")
-        if suggestion.status != "pending":
-            raise ValueError(f"采购建议状态为 {suggestion.status}，不可转单")
-        final_supplier_id = supplier_id or suggestion.suggested_supplier_id
-        if not final_supplier_id:
-            raise ValueError("必须指定供应商")
-        final_quantity = quantity or suggestion.suggested_quantity
-
-        capacity = crud_supply_capacity.get_by_supplier_and_material(
-            db, final_supplier_id, suggestion.material_id
+        # 审计整改：高金额/关键物料不得由采购员直接转单。
+        # 所有转单必须先经分级审批（app.services.approval.ApprovalService），
+        # 全部有效批准完成后由 convert_to_order 闸门创建正式订单。
+        raise PermissionError(
+            "采购建议不得直接转单：请先通过 POST /api/v1/approvals/requests 提交分级审批，"
+            "全部有效批准完成后调用 /approvals/requests/{id}/convert 创建正式订单"
         )
-        capacity_warning = None
-        if capacity:
-            coverage_ratio, actual_dd, can_cover = PurchaseService._evaluate_supplier_capacity(
-                capacity, final_quantity
-            )
-            if not can_cover:
-                stock = capacity.current_stock or 0
-                daily = capacity.daily_capacity or 0
-                days = capacity.delivery_days or 0
-                max_able = stock + daily * days
-                capacity_warning = (
-                    f"供应商库存({stock})+{days}天产能({daily * days})={max_able}，"
-                    f"无法覆盖需求{final_quantity}，缺口{final_quantity - max_able}"
-                )
-        else:
-            actual_dd = 30
-
-        final_date = expected_date or suggestion.expected_delivery_date or (
-            date.today() + timedelta(days=actual_dd)
-        )
-        remark_parts = [f"由采购建议#{suggestion_id}生成"]
-        if capacity_warning:
-            remark_parts.append(capacity_warning)
-
-        from app.schemas import PurchaseOrderCreate
-        order_in = PurchaseOrderCreate(
-            order_no=order_no,
-            supplier_id=final_supplier_id,
-            material_id=suggestion.material_id,
-            quantity=final_quantity,
-            expected_date=final_date,
-            status="ordered",
-            remark="；".join(remark_parts)
-        )
-        order = crud_purchase_order.create(db, obj_in=order_in)
-        crud_purchase_suggestion.update(db, db_obj=suggestion, obj_in={"status": "converted"})
-        return order

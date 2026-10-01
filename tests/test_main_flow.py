@@ -4,6 +4,7 @@ from tests.test_data_factory import DataFactory
 
 from app.services.requirement import RequirementService
 from app.services.purchase import PurchaseService
+from app.services.approval import ApprovalService
 from app.services.supplier_confirmation import SupplierConfirmationService
 from app.services.inspection import InspectionService
 from app.services.delay_analysis import DelayAnalysisService
@@ -11,7 +12,7 @@ from app.crud.purchase import crud_inventory_batch, crud_purchase_suggestion
 from app.crud.supplier_confirmation import crud_supplier_shortage_impact
 from app.schemas import (
     SupplierConfirmationConfirm, SupplierConfirmationBatchCreate,
-    InspectionCreate
+    InspectionCreate, ApprovalSubmitRequest
 )
 
 
@@ -63,15 +64,24 @@ class TestMainSupplyChainFlow:
         assert carbon_suggestion.status == "pending"
         assert carbon_suggestion.suggested_supplier_id is not None
 
-        # === Step 3: 到货抽检（使用铝合金车架的采购建议先转单） ===
-        # 先转单，避免供应商确认改变状态后无法转单
-        po_aluminum = PurchaseService.convert_suggestion_to_order(
-            db_session,
+        # === Step 3: 到货抽检（铝合金车架采购建议先走分级审批，再由闸门转单） ===
+        # 审计整改：采购员不得直接转单，须提交分级审批、逐级有效批准后才创建正式订单
+        approval_in = ApprovalSubmitRequest(
             suggestion_id=aluminum_suggestion.id,
             order_no="TEST-PO-001",
+            supplier_id=factory.suppliers["TS002"].id,
             quantity=200,
-            expected_date=date.today() + timedelta(days=10)
+            expected_date=date.today() + timedelta(days=10),
+            requester="测试采购员",
         )
+        approval_req = ApprovalService.submit(db_session, approval_in)
+        # 金额 200*350=70000元 → 金额定级L2；TM002是关键物料上调1级 → 需要L3
+        assert approval_req.required_level == 3
+        assert approval_req.risk_level == "high"
+        for approver in ["采购主管", "采购经理", "财务总监"]:
+            ApprovalService.act(db_session, approval_req.id, approver, "approve")
+        # 全部有效批准完成前不得创建正式订单
+        po_aluminum = ApprovalService.convert_to_order(db_session, approval_req.id)
 
         assert po_aluminum is not None
         assert po_aluminum.order_no == "TEST-PO-001"

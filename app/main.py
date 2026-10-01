@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from app.config import settings
 from app.database import engine, Base, get_db
 from app.routers import materials, vehicles, suppliers, purchase, alternatives, statistics
-from app.routers import supplier_confirmations
+from app.routers import supplier_confirmations, approvals
 from app.data.seed import seed_all
 
 Base.metadata.create_all(bind=engine)
@@ -20,11 +20,14 @@ app.include_router(purchase.router, prefix=settings.API_V1_STR)
 app.include_router(alternatives.router, prefix=settings.API_V1_STR)
 app.include_router(statistics.router, prefix=settings.API_V1_STR)
 app.include_router(supplier_confirmations.router, prefix=settings.API_V1_STR)
+app.include_router(approvals.router, prefix=settings.API_V1_STR)
 
 @app.on_event("startup")
 def startup_event():
     db = next(get_db())
     try:
+        from app.services.approval import ApprovalService
+        ApprovalService.ensure_default_version(db)
         seed_all(db)
     finally:
         db.close()
